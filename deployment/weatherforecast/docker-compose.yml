@@ -1,0 +1,11 @@
+version: "3"
+
+services:
+  weatherforecast-service:
+    image: registry.my.local/develop/weatherforecast
+    restart: always
+    environment:
+      TZ: Asia/Bangkok
+      UseSwagger: "Y"
+    ports:
+      - 8800:80

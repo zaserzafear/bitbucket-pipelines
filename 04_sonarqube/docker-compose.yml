@@ -1,0 +1,29 @@
+version: "3"
+
+services:
+  sonarqube:
+    image: sonarqube:community
+    restart: always
+    depends_on:
+      - sonarqube_db
+    ports:
+      - "9000:9000"
+    environment:
+      SONAR_ES_BOOTSTRAP_CHECKS_DISABLE: "true"
+      sonar.jdbc.url: "jdbc:postgresql://sonarqube_db/sonar"
+      sonar.jdbc.username: "sonar"
+      sonar.jdbc.password: "sonar"
+    volumes:
+      - ./sonarqube/logs:/opt/sonarqube/logs
+      - ./sonarqube/conf:/opt/sonarqube/conf
+      - ./sonarqube/data:/opt/sonarqube/data
+      - ./sonarqube/extensions:/opt/sonarqube/extensions
+
+  sonarqube_db:
+    image: postgres:13
+    restart: always
+    environment:
+      POSTGRES_USER: "sonar"
+      POSTGRES_PASSWORD: "sonar"
+    volumes:
+      - ./sonarqube/db/data:/var/lib/postgresql/data

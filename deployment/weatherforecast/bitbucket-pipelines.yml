@@ -1,0 +1,86 @@
+definitions:
+  steps:
+    - step: &sonarqube-step
+        name: SonarQube analysis
+        image: registry.my.local/library/dotnet/sdk:3.1-sonarqube
+        runs-on:
+          - "self.hosted"
+          - "linux"
+        caches:
+          - dotnetcore
+          - sonar
+        script:
+          - export PATH="$PATH:/root/.dotnet/tools"
+          - dotnet sonarscanner begin /k:"${SOLUTION_NAME}" /d:"sonar.login=${SONAR_TOKEN}"  /d:"sonar.host.url=${SONAR_HOST_URL}"
+          - dotnet build
+          - dotnet sonarscanner end /d:"sonar.login=${SONAR_TOKEN}"
+    - step: &build-test-step
+        name: Build and Test
+        image: registry.my.local/library/dotnet/sdk:3.1
+        caches:
+          - dotnetcore
+        script:
+          - REPORTS_PATH=./test-reports/build_${BITBUCKET_BUILD_NUMBER}
+          - dotnet restore
+          - dotnet build --no-restore --configuration Release
+          - dotnet test --no-build --configuration Release --test-adapter-path:. --logger:"junit;LogFilePath=$REPORTS_PATH/junit.xml"
+    - step: &build-push-step
+        name: Docker Build & Push
+        runs-on:
+          - "self.hosted"
+          - "linux"
+        services:
+          - docker
+        caches:
+          - docker
+        script:
+          - 'curl -X POST -H "Authorization: Bearer ${LINE_NOTI_TOKEN}" -F "message=${BITBUCKET_REPO_FULL_NAME} | Build Number : ${BITBUCKET_BUILD_NUMBER} | Commit : ${BITBUCKET_COMMIT} | Branch : ${BITBUCKET_BRANCH} | Build Start" ${LINE_NOTI_URL}  || true'
+          - echo "${DOCKER_REGISTRY_REPOSITORIES_IP} ${DOCKER_REGISTRY_REPOSITORIES}" >> /etc/hosts
+          - ping ${DOCKER_REGISTRY_REPOSITORIES} -c 4 || true
+          - echo ${DOCKER_REGISTRY_PASSWORD} | docker login ${DOCKER_REGISTRY_REPOSITORIES} -u ${DOCKER_REGISTRY_USERNAME} --password-stdin
+          - docker build --quiet --tag ${DOCKER_REGISTRY_REPOSITORIES}/${DOCKER_IMAGE}:${DOCKER_IMAGE_TAG} .
+          - docker push --quiet ${DOCKER_REGISTRY_REPOSITORIES}/${DOCKER_IMAGE}:${DOCKER_IMAGE_TAG}
+        after-script:
+          - 'curl -X POST -H "Authorization: Bearer ${LINE_NOTI_TOKEN}" -F "message=${BITBUCKET_REPO_FULL_NAME} | Build Number : ${BITBUCKET_BUILD_NUMBER} | Commit : ${BITBUCKET_COMMIT} | Branch : ${BITBUCKET_BRANCH} | Build Finish | Exit Code : ${BITBUCKET_EXIT_CODE}" ${LINE_NOTI_URL}  || true'
+    - step: &deploy-robot-step
+        name: Deploy & Robot Test On Test Deployment
+        deployment: test
+        runs-on:
+          - "self.hosted"
+          - "linux"
+        script:
+          - 'curl -X POST -H "Authorization: Bearer ${LINE_NOTI_TOKEN}" -F "message=${BITBUCKET_REPO_FULL_NAME} | Build Number : ${BITBUCKET_BUILD_NUMBER} | Commit : ${BITBUCKET_COMMIT} | Branch : ${BITBUCKET_BRANCH} | Deploy On ${TEST_SERVER_IP} | Start" ${LINE_NOTI_URL}  || true'
+          - ping ${TEST_SERVER_IP} -c 4 || true
+          - pipe: atlassian/ssh-run:0.4.1
+            variables:
+              SSH_USER: ${SERVER_USER}
+              SERVER: ${SERVER_IP}
+              SSH_KEY: ${SERVER_KEY}
+              MODE: "command"
+              COMMAND: ${UPDATE_COMMAND}
+          - 'curl -X POST -H "Authorization: Bearer ${LINE_NOTI_TOKEN}" -F "message=${BITBUCKET_REPO_FULL_NAME} | Build Number : ${BITBUCKET_BUILD_NUMBER} | Commit : ${BITBUCKET_COMMIT} | Branch : ${BITBUCKET_BRANCH} | Robot Test On ${TEST_SERVER_IP} | Start" ${LINE_NOTI_URL}  || true'
+          - echo "${DOCKER_REGISTRY_REPOSITORIES_IP} ${DOCKER_REGISTRY_REPOSITORIES}" >> /etc/hosts
+          - ping ${DOCKER_REGISTRY_REPOSITORIES} -c 4 || true
+          - echo ${DOCKER_REGISTRY_PASSWORD} | docker login ${DOCKER_REGISTRY_REPOSITORIES} -u ${DOCKER_REGISTRY_USERNAME} --password-stdin
+          - ping ${APPLICATION_DOMAIN} -c 4 || true
+          - mkdir $BITBUCKET_CLONE_DIR/robot-output
+          - docker pull --quiet ${DOCKER_REGISTRY_REPOSITORIES}/${APPLICATION_ROBOT_IMAGE}:${APPLICATION_ROBOT_TAG}
+          - docker run --rm --name ${APPLICATION_ROBOT_NAME} -v $BITBUCKET_CLONE_DIR/robot-output:/src/output -e URL_LAB=${URL_LAB} -e EMAIL=${EMAIL} -e PASSWORD=${PASSWORD} -e PASSPORT=${PASSPORT} -e FIRSTNAME_EN=${FIRSTNAME_EN} -e LASTNAME_EN=${LASTNAME_EN} -e BIRTH_DATE=${BIRTH_DATE} ${DOCKER_REGISTRY_REPOSITORIES}/${APPLICATION_ROBOT_IMAGE}:${APPLICATION_ROBOT_TAG}
+        artifacts:
+          - robot-output**
+        after-script:
+          - 'curl -X POST -H "Authorization: Bearer ${LINE_NOTI_TOKEN}" -F "message=${BITBUCKET_REPO_FULL_NAME} | Build Number : ${BITBUCKET_BUILD_NUMBER} | Commit : ${BITBUCKET_COMMIT} | Branch : ${BITBUCKET_BRANCH} | Deploy & Robot Test On ${TEST_SERVER_IP} Finish | Exit Code : ${BITBUCKET_EXIT_CODE}" ${LINE_NOTI_URL}  || true'
+
+  caches:
+    sonar: ~/.sonar
+
+pipelines:
+  default:
+    - parallel:
+        - step: *build-test-step
+        - step: *sonarqube-step
+
+  branches:
+    develop_4:
+      - step: *build-push-step
+      - step: *deploy-robot-step
